@@ -17,7 +17,7 @@ data Instruction = Imm Int
                  | IError String
                  deriving (Show)
 
-data FWord = FWord String [Instruction] 
+data FWord = FWord {fwName :: String, fwInst :: [Instruction], fwInline :: Bool}
            | FWordError String
            deriving (Show)
 
@@ -28,11 +28,11 @@ data Env = Env { base :: [FWord],
 type GenEnv = [(String, Int)]
 
 
-baseWords = [ FWord "+" [Add]
-            , FWord "dup" [Dup]
-            , FWord "swap" [Swap]
-            , FWord "drop" [Drop]
-            , FWord ";" [Return]
+baseWords = [ FWord "+" [Add] True
+            , FWord "dup" [Dup] True
+            , FWord "swap" [Swap] True
+            , FWord "drop" [Drop] True
+            , FWord ";" [Return] True
             ]
 
 
@@ -51,7 +51,7 @@ generateBytes sym (Return:[]) = [0x0600]
 generateBytes sym inst = []
 
 codeGenWord :: GenEnv -> FWord -> (String, [Word16])
-codeGenWord env (FWord n is) = (n, generateBytes env is)
+codeGenWord env (FWord n is _) = (n, generateBytes env is)
 
 
 lookupWord :: Env -> String -> Maybe FWord
@@ -59,19 +59,22 @@ lookupWord env@Env{..} name = found where
     userFound = find cmpfn user
     baseFound = find cmpfn base
     found = if isJust userFound then userFound else baseFound
-    cmpfn (FWord n _) | n == name = True
+    cmpfn (FWord n _ _) | n == name = True
     cmpfn _ = False
+
+shouldInline :: FWord -> Bool
+shouldInline FWord{..} = fwInline
 
 processToken :: Env -> String -> [Instruction]
 processToken env x 
-    | wordExists && (length instructions) <= 2 = instructions
+    | wordExists && shouldInline (fromJust inst) = instructions
     | wordExists = [Call x]
     | isLiteral = [Imm literal]
     | otherwise = [IError $ "Undefined Word " ++ x]
     where
         inst = lookupWord env x
         wordExists = isJust inst
-        Just (FWord _ instructions) = inst
+        Just (FWord _ instructions _) = inst
         litParse = reads x :: [(Int, String)]
         isLiteral = length litParse == 1 && snd (head litParse) == ""
         [(literal, _)] = litParse
@@ -79,7 +82,7 @@ processToken env x
 compileDefinition :: [String] -> Env -> FWord
 compileDefinition (t:ts) env  = newWord where
     instructions = foldMap (processToken env) ts :: [Instruction]
-    newWord = FWord t instructions
+    newWord = FWord t instructions False
 
 getDefinitions :: [String] -> [[String]]
 getDefinitions tokens = splitOn [":"] tokens
