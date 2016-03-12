@@ -43,6 +43,8 @@ baseWords = [ FWord "+" [Add] True
 
 addInst = 0x6303 :: Word16
 dupInst = 0x6031 :: Word16
+swapInst = 0x60a0 :: Word16
+dropInst = 0x6083 :: Word16
 retInst = 0x6004 :: Word16
 jmpInst = 0x2000 :: Word16
 callInst = 0x0000 :: Word16
@@ -74,20 +76,18 @@ generateBytes sym (Return : is) = retInst : generateBytes (incAddr sym) is
 -- Not a real instruction, just a target for a branch
 generateBytes sym@GenEnv{..} (BranchTarget x : is) = generateBytes sym' is where
     sym' = sym {locals = (x, geAddr) : locals}
-
-
 generateBytes sym@GenEnv{..} (Branch x : is) = jmpInst + loc : generateBytes (incAddr sym) is where
     loc = findLocalAddress sym x
 
 generateBytes sym@GenEnv{..} (Call t : is) = callInst + loc : generateBytes (incAddr sym) is where
     loc = findSymbolAddress sym t
 
-
 generateBytes sym@GenEnv{..} (Imm x : is) = (0x8000 .|. fromIntegral x) : generateBytes (incAddr sym) is
 
 generateBytes sym@GenEnv{..} (Add : is) = addInst : generateBytes (incAddr sym) is
-
 generateBytes sym@GenEnv{..} (Dup : is) = dupInst : generateBytes (incAddr sym) is
+generateBytes sym@GenEnv{..} (Swap : is) = swapInst : generateBytes (incAddr sym) is
+generateBytes sym@GenEnv{..} (Drop : is) = dropInst : generateBytes (incAddr sym) is
 
 generateBytes _ inst = error $ printf "Unknown Instruction %s" $ show inst
 
