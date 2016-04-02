@@ -181,6 +181,8 @@ processToken env@Env{..} (x:xs)
             "s\"" -> (env, [Str stringLit], remTokens)
             "if" ->  (env', [BranchNE nextLabel], xs) where
                 env' = env { nextLabel = nextLabel + 1, targetStack = nextLabel : targetStack }
+            "else" -> (env', [Branch nextLabel, BranchTarget (head targetStack)], xs) where
+                env' = env { nextLabel = nextLabel + 1, targetStack = nextLabel : tail targetStack }
             "then" -> (env', [BranchTarget (head targetStack)], xs) where
                 env' = env { targetStack = tail targetStack }
             _  -> (env, [IError $ "Undefined Word " ++ x], [])
