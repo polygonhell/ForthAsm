@@ -1,6 +1,3 @@
-: t1 1 2 + ;
-: t2 t1 3 + ;
-: t3 t2 dup + ;
-: t4 S" Hello World!!" S" The End!" s" Hello World!!" ;
+: t5 1 IF s" Hello World!" THEN s" Bye!" ;
 
-: main t4 ;
+: main t5 ;

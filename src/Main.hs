@@ -15,7 +15,7 @@ import Debug.Trace
 
 data Instruction = Imm Int 
                  | Str String
-                 | Branch Int | BranchTarget Int 
+                 | Branch Int | BranchNE Int | BranchTarget Int 
                  | Call String | Return
                  | Add | Sub | Mul 
                  | Dup | Swap | Drop
@@ -27,13 +27,16 @@ data FWord = FWord {fwName :: String, fwInst :: [Instruction], fwInline :: Bool}
            deriving (Show)
 
 data Env = Env { base :: [FWord],
-                 user :: [FWord]
+                 user :: [FWord],
+                 nextLabel :: Int,
+                 targetStack :: [Int]
                } deriving (Show)
 
 data GenEnv = GenEnv { geAddr :: Int
                      , symbols :: [(String, Int)]
                      , locals :: [(Int, Int)]
-                     , strings :: [(String, [Int])] -- Strings and their Patch addresses
+                     , fwdRef :: [(Int, Int)] -- Forwards references label -> address
+                     , geStrings :: [(String, [Int])] -- Strings and their Patch addresses
                      } deriving (Show)
 
 
@@ -51,14 +54,15 @@ swapInst = 0x60a0 :: Word16
 dropInst = 0x6083 :: Word16
 retInst = 0x6004 :: Word16
 jmpInst = 0x2000 :: Word16
+jmpNEInst = 0x4000 :: Word16
 callInst = 0x0000 :: Word16
 
 
-findLocalAddress :: GenEnv -> Int -> Word16
+findLocalAddress :: GenEnv -> Int -> Maybe Word16
 findLocalAddress GenEnv{..} item = addr where
     cmpfn a = fst a == item
     addr' = find cmpfn locals
-    addr = fromIntegral $ snd $ fromMaybe (0, 0) addr'
+    addr = addr' >>= (Just . fromIntegral . snd)
 
 findSymbolAddress :: GenEnv -> String -> Word16
 findSymbolAddress GenEnv{..} item = addr where
@@ -69,8 +73,8 @@ findSymbolAddress GenEnv{..} item = addr where
 
 addStringRef :: GenEnv -> String -> Int -> GenEnv
 addStringRef env@GenEnv{..} str addr = env' where
-    strings' = addOrUpdateStrings strings str addr
-    env' = env{strings = strings'}
+    strings' = addOrUpdateStrings geStrings str addr
+    env' = env{geStrings = strings'}
     addOrUpdateStrings :: [(String, [Int])] -> String -> Int -> [(String, [Int])]
     addOrUpdateStrings [] s a = [(s, [a])]
     addOrUpdateStrings ((s', as): strs) s a 
@@ -85,6 +89,15 @@ addBytes:: [Word16] -> (GenEnv, [Word16]) -> (GenEnv, [Word16])
 addBytes ws (env@GenEnv{..}, rws) = (env, ws ++ rws)
 
 
+generateBranch :: Word16 -> Int -> GenEnv -> [Instruction] -> (GenEnv, [Word16])
+generateBranch w x sym@GenEnv{..} is = addBytes [w + loc] (generateBytes (incAddr sym') is) where
+    loc' = findLocalAddress sym x
+    (loc, sym') = case loc' of
+        Just x -> (x, sym)
+        Nothing -> (0xfff, sym'') where
+            sym'' = sym {fwdRef = (x, geAddr):fwdRef}
+
+
 generateBytes :: GenEnv -> [Instruction] -> (GenEnv, [Word16])
 generateBytes sym [] = (sym, [])
 
@@ -97,8 +110,9 @@ generateBytes sym (Return : is) = addBytes [retInst] (generateBytes (incAddr sym
 -- Not a real instruction, just a target for a branch
 generateBytes sym@GenEnv{..} (BranchTarget x : is) = generateBytes sym' is where
     sym' = sym {locals = (x, geAddr) : locals}
-generateBytes sym@GenEnv{..} (Branch x : is) = addBytes [jmpInst + loc] (generateBytes (incAddr sym) is) where
-    loc = findLocalAddress sym x
+
+generateBytes sym@GenEnv{..} (Branch x : is) = generateBranch jmpInst x sym is
+generateBytes sym@GenEnv{..} (BranchNE x : is) = generateBranch jmpNEInst x sym is
 
 generateBytes sym@GenEnv{..} (Call t : is) = addBytes [callInst + loc] (generateBytes (incAddr sym) is) where
     loc = findSymbolAddress sym t
@@ -118,8 +132,18 @@ generateBytes _ inst = error $ printf "Unknown Instruction %s" $ show inst
 
 
 codeGenWord :: GenEnv -> FWord -> (GenEnv, String, [Word16])
-codeGenWord env (FWord n is _) = (env', n, bytes) where 
+codeGenWord env (FWord n is _) = (env', n, bytes') where 
     (env', bytes) = generateBytes env is
+    -- Patch the forwards references
+    bytes' = applyPatches (geAddr env) sortedPatches patchFn bytes
+    patchFn w pw = (w .&. 0xe000) + pw
+    patches = map refToAddr (fwdRef env')
+    sortedPatches = sortBy (comparing fst) patches
+    refToAddr :: (Int, Int) -> (Int, Word16)
+    refToAddr (label, addr) = (addr, target) where
+        target = case findLocalAddress env' label of
+            Just x -> fromIntegral x
+            Nothing -> error $ "Missing forwards ref " ++ show label 
 
 
 
@@ -147,13 +171,19 @@ getString ts = (unwords strs, resids) where
             (rStrs, resids) = getString' ts
     (strs, resids) = getString' ts
 
-processToken :: Env -> [String] -> ([Instruction], [String])
-processToken env (x:xs) 
-    | wordExists && shouldInline (fromJust inst) = (instructions, xs)
-    | wordExists = ([Call x], xs)
-    | isLiteral = ([Imm literal], xs)
-    | isString = ([Str stringLit], remTokens)
-    | otherwise = ([IError $ "Undefined Word " ++ x], [])
+processToken :: Env -> [String] -> (Env, [Instruction], [String])
+processToken env@Env{..} (x:xs) 
+    | wordExists && shouldInline (fromJust inst) = (env, instructions, xs)
+    | wordExists = (env, [Call x], xs)
+    | isLiteral = (env, [Imm literal], xs)
+    | otherwise = 
+        case lowerX of 
+            "s\"" -> (env, [Str stringLit], remTokens)
+            "if" ->  (env', [BranchNE nextLabel], xs) where
+                env' = env { nextLabel = nextLabel + 1, targetStack = nextLabel : targetStack }
+            "then" -> (env', [BranchTarget (head targetStack)], xs) where
+                env' = env { targetStack = tail targetStack }
+            _  -> (env, [IError $ "Undefined Word " ++ x], [])
     where
         inst = lookupWord env $ map toLower x
         wordExists = isJust inst
@@ -161,14 +191,14 @@ processToken env (x:xs)
         litParse = reads x :: [(Int, String)]
         isLiteral = length litParse == 1 && snd (head litParse) == ""
         [(literal, _)] = litParse
-        isString = "s\"" == map toLower x
+        lowerX = map toLower x
         (stringLit, remTokens) = getString xs
 
 
 compileTokens :: Env -> [String] -> [Instruction]
 compileTokens _ [] = []
-compileTokens env t = insts ++ compileTokens env ts where
-    (insts, ts) = processToken env t
+compileTokens env t = insts ++ compileTokens env' ts where
+    (env', insts, ts) = processToken env t
 
 compileDefinition :: [String] -> Env -> FWord
 compileDefinition (t:ts) env  = newWord where
@@ -183,7 +213,7 @@ compile :: GenEnv -> [FWord] -> (GenEnv, [Word16])
 compile env [] = (env, [])
 compile env@GenEnv{..} (w:ws) = (env''', wOut ++ wsOut) where
     (env', _, wOut) = codeGenWord env w
-    env'' = env' { locals = [], symbols = (fwName w, geAddr) : symbols }
+    env'' = env' {symbols = (fwName w, geAddr) : symbols, locals = [], fwdRef = []} 
     (env''', wsOut) = compile env'' ws
 
 
@@ -207,13 +237,13 @@ compileStrings addr (str:strs) = (p ++ p', b ++ padding ++ b') where
     padding = replicate (addr'' - addr') 0
     (p', b') = compileStrings addr'' strs -- Strings must be 4 byte aligned
 
-applyPatches :: Int -> [(Int, Word16)] -> [Word16] -> [Word16]
-applyPatches addr _ [] = []
-applyPatches addr [] ws = ws
-applyPatches addr patches@((pAddr, pw):ps) (w:ws)
+applyPatches :: Int -> [(Int, Word16)] -> (Word16 -> Word16 -> Word16) -> [Word16] -> [Word16]
+applyPatches addr _ _ [] = []
+applyPatches addr [] _ ws = ws
+applyPatches addr patches@((pAddr, pw):ps) fn (w:ws)
     | pAddr < addr = error "Patches not sorted or duplicate patch"
-    | pAddr == addr = pw : applyPatches (addr+1) ps ws
-    | otherwise = w : applyPatches (addr+1) patches ws
+    | pAddr == addr = fn w pw : applyPatches (addr+1) ps fn ws
+    | otherwise = w : applyPatches (addr+1) patches fn ws
 
 
 
@@ -242,21 +272,22 @@ main = do
     let singlewords = words contents
         defs = tail $ getDefinitions singlewords
         combine :: Env -> [String] -> Env 
-        combine env@Env{..} d = Env base (compileDefinition d env : user)
-        compiledDefsR = foldl combine (Env baseWords []) defs
+        combine env@Env{..} d = Env base (compileDefinition d env : user)  0 [] 
+        compiledDefsR = foldl combine (Env baseWords [] 0 []) defs
         compiledDefs = reverse $ user compiledDefsR
 
     print compiledDefs
     
-    let (env, uCompiled) = compile (GenEnv 2 [] [] []) compiledDefs
+    let (env, uCompiled) = compile (GenEnv 2 [] [] [] []) compiledDefs
         (_, boot) = generateBytes (env {geAddr = 0}) bootCode
         compiled = boot ++ uCompiled
 
     -- Stick the Strings on the End
     let stringBase = roundTo2 $ length compiled
-        (patches, compiledStrings) = compileStrings stringBase (strings env)
+        (patches, compiledStrings) = compileStrings stringBase (geStrings env)
         sortedPatches = sortBy (comparing fst) patches
-        patched = applyPatches 0 sortedPatches compiled
+        patched = applyPatches 0 sortedPatches patchedValue compiled
+        patchedValue _ y = y
 
     print $ "Patches = " ++ show sortedPatches
     print $ "StringBaseAddr = " ++ show stringBase
@@ -267,7 +298,7 @@ main = do
 
     let memoryImage = patched ++ replicate (stringBase - length patched) 0  ++ compiledStrings
     print $ symbols env
-    print $ strings env
+    print $ geStrings env
     print $ word16toHex $ compiled ++ compiledStrings
     print $ word16toHex memoryImage
     putStr $ word16toBinLines memoryImage
