@@ -1,3 +1,4 @@
-: t5 1 IF s" Hello World!" ELSE s" Bye!" THEN s" Bye!" ;
+: t6 0 IF 1 IF 2 THEN THEN ;
 
-: main t5 ;
+
+: main t6 ;
