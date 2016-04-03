@@ -18,7 +18,9 @@ data Instruction = Imm Int
                  | Branch Int | BranchNE Int | BranchTarget Int 
                  | Call String | Return
                  | Add | Sub | Mul 
-                 | Dup | Swap | Drop
+                 | CmpEq
+                 | Dup | Swap | Drop | Over | Drop2
+                 | ToR | FromR | PeekR
                  | IError String
                  deriving (Show)
 
@@ -41,21 +43,37 @@ data GenEnv = GenEnv { geAddr :: Int
 
 
 baseWords = [ FWord "+" [Add] True
+            , FWord "-" [Sub] True
             , FWord "dup" [Dup] True
             , FWord "swap" [Swap] True
             , FWord "drop" [Drop] True
+            , FWord "2drop" [Drop2] True
+            , FWord "over" [Over] True
+            , FWord ">r" [ToR] True
+            , FWord "r>" [FromR] True
+            , FWord "r@" [PeekR] True
             , FWord ";" [Return] True
+            , FWord "=" [CmpEq] True
+            -- Compund words
+            , FWord "2dup" [Over, Over] True
             ]
 
 
 addInst = 0x6303 :: Word16
+subInst = 0x6383 :: Word16
 dupInst = 0x6031 :: Word16
 swapInst = 0x60a0 :: Word16
 dropInst = 0x6083 :: Word16
+drop2Inst = 0x6102 :: Word16
+overInst = 0x60b1 :: Word16
+toRInst = 0x60e3 :: Word16
+fromRInst = 0x6435 :: Word16
+peekRInst = 0x6431 :: Word16
 retInst = 0x6004 :: Word16
 jmpInst = 0x2000 :: Word16
 jmpNEInst = 0x4000 :: Word16
 callInst = 0x0000 :: Word16
+cmpEqInst = 0x6483 :: Word16
 
 
 findLocalAddress :: GenEnv -> Int -> Maybe Word16
@@ -124,9 +142,16 @@ generateBytes sym@GenEnv{..} (Str s : is) = addBytes [0x8000 .|. fromIntegral (l
     sym'' = sym'{geAddr = geAddr+2}
 
 generateBytes sym@GenEnv{..} (Add : is) = addBytes [addInst] (generateBytes (incAddr sym) is)
+generateBytes sym@GenEnv{..} (Sub : is) = addBytes [subInst] (generateBytes (incAddr sym) is)
+generateBytes sym@GenEnv{..} (CmpEq : is) = addBytes [cmpEqInst] (generateBytes (incAddr sym) is)
 generateBytes sym@GenEnv{..} (Dup : is) = addBytes [dupInst] (generateBytes (incAddr sym) is)
 generateBytes sym@GenEnv{..} (Swap : is) = addBytes [swapInst] (generateBytes (incAddr sym) is)
 generateBytes sym@GenEnv{..} (Drop : is) = addBytes [dropInst] (generateBytes (incAddr sym) is)
+generateBytes sym@GenEnv{..} (Drop2 : is) = addBytes [drop2Inst] (generateBytes (incAddr sym) is)
+generateBytes sym@GenEnv{..} (ToR : is) = addBytes [toRInst] (generateBytes (incAddr sym) is)
+generateBytes sym@GenEnv{..} (FromR : is) = addBytes [fromRInst] (generateBytes (incAddr sym) is)
+generateBytes sym@GenEnv{..} (PeekR : is) = addBytes [peekRInst] (generateBytes (incAddr sym) is)
+generateBytes sym@GenEnv{..} (Over : is) = addBytes [overInst] (generateBytes (incAddr sym) is)
 
 generateBytes _ inst = error $ printf "Unknown Instruction %s" $ show inst
 
@@ -185,6 +210,10 @@ processToken env@Env{..} (x:xs)
                 env' = env { nextLabel = nextLabel + 1, targetStack = nextLabel : tail targetStack }
             "then" -> (env', [BranchTarget (head targetStack)], xs) where
                 env' = env { targetStack = tail targetStack }
+            "do" -> (env', [Swap, BranchTarget nextLabel, ToR, ToR], xs) where
+                env' =  env { nextLabel = nextLabel + 1, targetStack = nextLabel : tail targetStack }
+            "loop" -> (env', [FromR, Imm 1, Add, FromR, Over, Over, Sub, BranchNE (head targetStack), Drop2], xs) where
+                env' =  env { targetStack = tail targetStack }
             _  -> (env, [IError $ "Undefined Word " ++ x], [])
     where
         inst = lookupWord env $ map toLower x
